@@ -2,6 +2,8 @@ from __future__ import absolute_import
 from __future__ import print_function
 from math import log2
 import random
+import sys
+import time
 import numpy as np
 
 class Simulator():
@@ -36,11 +38,19 @@ class Simulator():
         self.round = 0
         self.car_success_dict = {0:0}
 
-    def run_simulation(self):
+    def run_simulation(self,strategy='equal_allocate'):
         time_steps = np.arange(0,self.T_total,self.dt)
         
-        for t in time_steps:
-            W_down_allocate, W_up_allocate = self.allocate_bandwidth(strategy='uniform_allocate')
+        scale = 50
+        start = time.perf_counter()
+
+        for i,t in enumerate(time_steps):
+            a = "*" * int(i/len(time_steps)*scale)
+            b = "." * (scale - int(i/len(time_steps)*scale))
+            c = (i / len(time_steps)) * 100
+            dur = time.perf_counter() - start
+            print("\r{:.0f}/{:.0f} {:^3.2f}%[{}->{}]{:.2f}s".format(t,self.T_total,c,a,b,dur),end = "")
+            W_down_allocate, W_up_allocate = self.allocate_bandwidth(strategy=strategy)
             self.car_state_update(W_down_allocate, W_up_allocate)
             self.poisson_arrive()
             if t >= (self.round+1)*self.T_rd:
@@ -51,20 +61,15 @@ class Simulator():
     def poisson_arrive(self):
         if np.random.uniform(0,1) < self.Lambda*self.dt:
             self.car_state_list.append([0,0,0])
-    
-    def allocate_bandwidth(self, strategy):
-        if strategy=='uniform_allocate':
-            return self.uniform_allocate()
-        # need to add in the future
 
-    def car_state_update(self, W_down_allocate, W_up_allocate):
+    def car_state_update(self, W_down_allocate, W_up_allocate,eps=1e-8):
         for car_idx, car_state in enumerate(self.car_state_list):
             car_state[1] += self.car_speed*self.dt
             if car_state[1]>=self.road_len:    #out of range
                 self.car_state_list[car_idx] = [4,None,None]
                 continue
             if car_state[0]==0:
-                W_i = W_down_allocate[car_idx]
+                W_i = W_down_allocate[car_idx]+eps
                 v_i = W_i*log2(1+self.P/self.N0/W_i) # Shannon theorem
                 car_state[2] += v_i/self.model_size
                 if car_state[2]>=1:
@@ -78,7 +83,7 @@ class Simulator():
                 else:
                     self.car_state_list[car_idx] = car_state
             elif car_state[0]==2:
-                W_i = W_up_allocate[car_idx]
+                W_i = W_up_allocate[car_idx]+eps
                 v_i = W_i*log2(1+self.P/self.N0/W_i) # Shannon theorem
                 car_state[2] += v_i/self.model_size
                 if car_state[2]>=1:
@@ -101,8 +106,19 @@ class Simulator():
             self.car_success_dict[self.round]=0
             for car_idx, car_state in enumerate(self.car_state_list):
                 self.car_state_list[car_idx] = [0,car_state[1],0]
+    
+    def allocate_bandwidth(self, strategy):
+        if strategy=='equal_allocate':
+            return self.equal_allocate()
+        elif strategy=='random_allocate':
+            return self.random_allocate()
+        elif strategy=='random_one_hot_allocate':
+            return self.random_one_hot_allocate()
+        else:
+            exit('strategy error!')
+        # need to add in the future
 
-    def uniform_allocate(self):
+    def equal_allocate(self):
         W_down_allocate, W_up_allocate = {},{}
         for car_idx, car_state in enumerate(self.car_state_list):
             if car_state[0]==0:
@@ -113,6 +129,48 @@ class Simulator():
             W_down_allocate[k] = 1./len(W_down_allocate)
         for k in W_up_allocate.keys():
             W_up_allocate[k] = 1./len(W_up_allocate)
+        return W_down_allocate, W_up_allocate
+
+    def random_one_hot_allocate(self):
+        W_down_allocate, W_up_allocate = {},{}
+        for car_idx, car_state in enumerate(self.car_state_list):
+            if car_state[0]==0:
+                W_down_allocate[car_idx]=0
+            elif car_state[0]==2:
+                W_up_allocate[car_idx]=0
+        if len(W_down_allocate)>0:
+            one_hot_idx = np.random.randint(len(W_down_allocate))
+            for idx,k in enumerate(W_down_allocate.keys()):
+                if idx == one_hot_idx:
+                    W_down_allocate[k]=1
+        if len(W_up_allocate)>0:
+            one_hot_idx = np.random.randint(len(W_up_allocate))
+            for idx,k in enumerate(W_up_allocate.keys()):
+                if idx == one_hot_idx:
+                    W_up_allocate[k]=1
+        return W_down_allocate, W_up_allocate
+
+    def random_allocate(self):
+        W_down_allocate, W_up_allocate = {},{}
+        for car_idx, car_state in enumerate(self.car_state_list):
+            if car_state[0]==0:
+                W_down_allocate[car_idx]=None
+            elif car_state[0]==2:
+                W_up_allocate[car_idx]=None
+        if len(W_down_allocate)>0:
+            pp_down = list(np.random.rand(len(W_down_allocate)-1))
+            pp_down = sorted(pp_down)
+            pp_down.insert(0,0.)
+            pp_down.append(1.)
+            for idx,k in enumerate(W_down_allocate.keys()):
+                W_down_allocate[k] = pp_down[idx+1]-pp_down[idx]
+        if len(W_up_allocate)>0:
+            pp_up = list(np.random.rand(len(W_up_allocate)-1))
+            pp_up = sorted(pp_up)
+            pp_up.insert(0,0.)
+            pp_up.append(1.)
+            for idx,k in enumerate(W_up_allocate.keys()):
+                W_up_allocate[k] = pp_up[idx+1]-pp_up[idx]
         return W_down_allocate, W_up_allocate
 
     def print_car_success(self):
@@ -145,26 +203,17 @@ class Simulator():
             print("valid_round_num:{:.4f}".format(valid_round_num))
         return valid_round_num
 
-"""for T_rd in [5,10,15,20,30,50,100,200,500,1000]:
-    print('T_rd:',T_rd,'',end='')
-    random.seed(1)
-    np.random.seed(1)
-    sim = Simulator(T_total=10000, dt=0.005,
-                 Lambda=0.1, car_speed=20, road_len=400,
-                 model_size=100,P=10,N0=1, W_down=1, W_up=1, 
-                 T_rd=T_rd, T_cp=5)
-    sim.run_simulation()
-    sim.get_statistics(prt=True)"""
-for T_rd in np.linspace(13,17,12):
-    print('T_rd:',T_rd,'')
-    random.seed(1)
-    np.random.seed(1)
-    sim = Simulator(T_total=10000, dt=0.005,
-                 Lambda=0.1, car_speed=20, road_len=400,
-                 model_size=200,P=1,N0=1, W_down=1, W_up=1, 
-                 T_rd=T_rd, T_cp=10)
-    sim.run_simulation()
-    sim.get_statistics(prt=True)
-    sim.get_valid_round_ratio(prt=True)
-    sim.get_valid_round_num(prt=True)
+if __name__=='__main__':
+    for strategy in ['equal_allocate', 'random_one_hot_allocate', 'random_allocate']:
+        print('strategy:',strategy,'')
+        random.seed(1)
+        np.random.seed(1)
+        sim = Simulator(T_total=10000, dt=0.005,
+                    Lambda=0.1, car_speed=20, road_len=400,
+                    model_size=200,P=1,N0=1, W_down=1, W_up=1, 
+                    T_rd=15, T_cp=10)
+        sim.run_simulation(strategy=strategy)
+        sim.get_statistics(prt=True)
+        sim.get_valid_round_ratio(prt=True)
+        sim.get_valid_round_num(prt=True)
 
